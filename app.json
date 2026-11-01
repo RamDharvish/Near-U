@@ -1,25 +1,48 @@
 {
   "expo": {
-    "name": "NearU",
-    "slug": "NearU",
+    "name": "Near-U",
+    "slug": "nearu",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
+    "scheme": "nearu",
     "userInterfaceStyle": "light",
-    "ios": {
-      "supportsTablet": true
-    },
     "android": {
+      "package": "com.nearu.app",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#7958CF",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false
     },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/f014f0da-32ee-4025-8ee0-a06a8267c3e2"
+    },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-font",
+      "expo-status-bar",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#7958CF",
+          "defaultChannel": "standard_nearu"
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "f014f0da-32ee-4025-8ee0-a06a8267c3e2"
+      }
     }
   }
 }

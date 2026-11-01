@@ -1,0 +1,11 @@
+name = "nearu-push-worker"
+main = "src/index.ts"
+compatibility_date = "2024-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+FIREBASE_PROJECT_ID = "nearu-962eb"
+
+[triggers]
+crons = ["*/30 * * * *"]
+

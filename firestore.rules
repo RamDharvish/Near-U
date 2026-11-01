@@ -1,0 +1,288 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId} (matches Firebase Auth UID)
+    // Fields:
+    //   - uid: string (required, immutable) - Auth UID of the user
+    //   - nearuId: string (required, immutable, format ^NEARU-[A-Z0-9]{4}$) - Unique shareable ID
+    //   - displayName: string (required, 1-30 chars) - Name shown to friends
+    //   - createdAt: timestamp (required, immutable) - Registration timestamp
+    //   - updatedAt: timestamp (optional) - Last profile update timestamp
+    //
+    // Collection: nearu_ids
+    // Document ID: {nearuId} (uppercase, e.g. NEARU-7K29)
+    // Fields:
+    //   - uid: string (required, immutable) - Auth UID that owns this Nearu ID
+    //   - createdAt: timestamp (required, immutable) - Claim timestamp
+    //
+    // Collection: friend_requests
+    // Document ID: {fromUid}_{toUid} (deterministic combination of sender and receiver UIDs)
+    // Fields:
+    //   - fromUid: string (required, immutable) - Sender's Auth UID
+    //   - toUid: string (required, immutable) - Recipient's Auth UID
+    //   - fromNearuId: string (required, immutable) - Sender's Nearu ID
+    //   - toNearuId: string (required, immutable) - Recipient's Nearu ID
+    //   - fromName: string (required, 1-30 chars) - Sender display name
+    //   - toName: string (required, 1-30 chars) - Recipient display name
+    //   - status: string (required, 'pending' | 'accepted' | 'declined')
+    //   - createdAt: timestamp (required, immutable)
+    //   - updatedAt: timestamp (optional)
+    //
+    // Subcollection: users/{userId}/friends/{friendUid}
+    // Document ID: {friendUid} (Auth UID of the friend)
+    // Fields:
+    //   - uid: string (required, immutable) - Friend's Auth UID
+    //   - nearuId: string (required, immutable) - Friend's Nearu ID
+    //   - displayName: string (required, 1-30 chars) - Friend display name
+    //   - pairedAt: timestamp (required, immutable) - Timestamp when friendship was formed
+    //
+    // ===============================================================
+
+    // Default Deny: block all unauthenticated and undeclared paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function validStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    function isValidNearuIdFormat(idStr) {
+      return idStr is string && idStr.matches('^NEARU-[A-Z0-9]{4,12}$');
+    }
+
+    function ownsNearuId(nearuId, userId) {
+      let idPath = /databases/$(database)/documents/nearu_ids/$(nearuId);
+      return (existsAfter(idPath) && getAfter(idPath).data.uid == userId)
+          || (exists(idPath) && get(idPath).data.uid == userId);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidUserCreate(userId) {
+      let data = request.resource.data;
+      return hasRequiredFields(['uid', 'nearuId', 'displayName', 'createdAt'])
+        && hasOnlyAllowedFields(['uid', 'nearuId', 'displayName', 'createdAt', 'updatedAt'])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && isValidNearuIdFormat(data.nearuId)
+        && validStringLength('displayName', 1, 30)
+        && data.createdAt is timestamp
+        && ownsNearuId(data.nearuId, userId);
+    }
+
+    function isValidUserUpdate(userId) {
+      let data = request.resource.data;
+      let existing = resource.data;
+      return hasRequiredFields(['uid', 'nearuId', 'displayName', 'createdAt'])
+        && hasOnlyAllowedFields(['uid', 'nearuId', 'displayName', 'createdAt', 'updatedAt'])
+        && data.uid == existing.uid
+        && data.nearuId == existing.nearuId
+        && data.createdAt == existing.createdAt
+        && validStringLength('displayName', 1, 30)
+        && (data.updatedAt is timestamp || !('updatedAt' in data));
+    }
+
+    function isValidFriendRequestCreate(requestId) {
+      let data = request.resource.data;
+      return hasRequiredFields(['fromUid', 'toUid', 'fromNearuId', 'toNearuId', 'fromName', 'toName', 'status', 'createdAt'])
+        && hasOnlyAllowedFields(['fromUid', 'toUid', 'fromNearuId', 'toNearuId', 'fromName', 'toName', 'status', 'createdAt', 'updatedAt'])
+        && data.fromUid == request.auth.uid
+        && data.toUid != request.auth.uid
+        && requestId == (data.fromUid + '_' + data.toUid)
+        && isValidNearuIdFormat(data.fromNearuId)
+        && isValidNearuIdFormat(data.toNearuId)
+        && validStringLength('fromName', 1, 30)
+        && validStringLength('toName', 1, 30)
+        && data.status == 'pending'
+        && data.createdAt is timestamp;
+    }
+
+    function isValidFriendRequestUpdate() {
+      let data = request.resource.data;
+      let existing = resource.data;
+      // Recipient can accept or decline; sender can cancel (decline) their own pending request
+      let isRecipientAction = existing.toUid == request.auth.uid
+        && (data.status == 'accepted' || data.status == 'declined');
+      let isSenderCancel = existing.fromUid == request.auth.uid
+        && data.status == 'declined';
+
+      return (isRecipientAction || isSenderCancel)
+        && existing.status == 'pending'
+        // Schema conformance: restrict strictly to approved fields
+        && hasRequiredFields(['fromUid', 'toUid', 'fromNearuId', 'toNearuId', 'fromName', 'toName', 'status', 'createdAt'])
+        && hasOnlyAllowedFields(['fromUid', 'toUid', 'fromNearuId', 'toNearuId', 'fromName', 'toName', 'status', 'createdAt', 'updatedAt'])
+        // All core sender and identity fields are strictly immutable
+        && data.fromUid == existing.fromUid
+        && data.toUid == existing.toUid
+        && data.fromNearuId == existing.fromNearuId
+        && data.toNearuId == existing.toNearuId
+        && data.fromName == existing.fromName
+        && data.toName == existing.toName
+        && data.createdAt == existing.createdAt
+        && (data.updatedAt is timestamp || !('updatedAt' in data));
+    }
+
+    function hasAcceptedFriendRequest(userA, userB) {
+      let req1 = /databases/$(database)/documents/friend_requests/$(userA + '_' + userB);
+      let req2 = /databases/$(database)/documents/friend_requests/$(userB + '_' + userA);
+      return (existsAfter(req1) && getAfter(req1).data.status == 'accepted')
+          || (existsAfter(req2) && getAfter(req2).data.status == 'accepted')
+          || (exists(req1) && get(req1).data.status == 'accepted')
+          || (exists(req2) && get(req2).data.status == 'accepted');
+    }
+
+    function isValidFriendCreate(friendUid) {
+      let data = request.resource.data;
+      return hasRequiredFields(['uid', 'nearuId', 'displayName', 'pairedAt'])
+        && hasOnlyAllowedFields(['uid', 'nearuId', 'displayName', 'pairedAt', 'lastNearuSentAt'])
+        && data.uid == friendUid
+        && isValidNearuIdFormat(data.nearuId)
+        && validStringLength('displayName', 1, 30)
+        && data.pairedAt is timestamp;
+    }
+
+    function isValidFriendUpdate(friendUid) {
+      let data = request.resource.data;
+      let existing = resource.data;
+      return hasRequiredFields(['uid', 'nearuId', 'displayName', 'pairedAt'])
+        && hasOnlyAllowedFields(['uid', 'nearuId', 'displayName', 'pairedAt', 'lastNearuSentAt'])
+        && data.uid == existing.uid
+        && data.nearuId == existing.nearuId
+        && data.displayName == existing.displayName
+        && data.pairedAt == existing.pairedAt
+        && (data.lastNearuSentAt is number || data.lastNearuSentAt is timestamp || !('lastNearuSentAt' in data));
+    }
+
+    // ===============================================================
+    // Rules Definitions
+    // ===============================================================
+
+    // User Profiles
+    match /users/{userId} {
+      // Individual lookup permitted; directory scraping (list) forbidden
+      allow get: if isAuthenticated();
+      allow list: if false;
+
+      allow create: if isOwner(userId) && isValidUserCreate(userId);
+      allow update: if isOwner(userId) && isValidUserUpdate(userId);
+      // Allow user to permanently delete their own user document
+      allow delete: if isOwner(userId);
+
+      // Subcollection: Synchronized Friends List
+      match /friends/{friendUid} {
+        // Only owner can read their friends list
+        allow read: if isOwner(userId);
+
+        // Both participants' records are created during the atomic acceptance batch with verified accepted request
+        allow create: if isAuthenticated()
+          && (isOwner(userId) || request.auth.uid == friendUid)
+          && hasAcceptedFriendRequest(userId, friendUid)
+          && isValidFriendCreate(friendUid);
+
+        allow update: if isOwner(userId) && isValidFriendUpdate(friendUid);
+        // Allow owner to remove friend, or friend to remove their reciprocal record
+        allow delete: if isOwner(userId) || (isAuthenticated() && request.auth.uid == friendUid);
+      }
+
+      // Subcollection: Device Push Tokens (Private to device owner only)
+      match /fcm_tokens/{tokenId} {
+        allow read, write, delete: if isOwner(userId);
+      }
+
+      match /expo_push_tokens/{tokenId} {
+        allow read, write, delete: if isOwner(userId);
+      }
+
+      // Subcollection: Device-to-Device NearU Events
+      match /nearu_events/{eventId} {
+        // Recipient can read and clean up their own received events
+        allow read, delete: if isOwner(userId);
+
+        // Sender can deliver a NearU event ONLY if they are an accepted friend
+        allow create: if isAuthenticated()
+          && hasAcceptedFriendRequest(userId, request.auth.uid)
+          && request.resource.data.fromUid == request.auth.uid
+          && request.resource.data.toUid == userId
+          && request.resource.data.timestamp is timestamp
+          && (request.resource.data.type == 'standard' || request.resource.data.type == 'long_press' || request.resource.data.type == 'nudge');
+
+        allow update: if false;
+      }
+    }
+
+    // Atomic Nearu ID Registry (Document ID is the Nearu ID itself)
+    match /nearu_ids/{nearuId} {
+      // Individual check permitted to look up friend; listing all IDs is forbidden
+      allow get: if isAuthenticated();
+      allow list: if false;
+
+      // First-come, first-served atomic claim
+      allow create: if isAuthenticated()
+        && request.resource.data.uid == request.auth.uid
+        && hasRequiredFields(['uid', 'createdAt'])
+        && hasOnlyAllowedFields(['uid', 'createdAt'])
+        && request.resource.data.createdAt is timestamp
+        && isValidNearuIdFormat(nearuId)
+        && !exists(/databases/$(database)/documents/nearu_ids/$(nearuId));
+
+      // Nearu IDs are permanently immutable once claimed
+      allow update: if false;
+      // Allow owner to delete their NearU ID mapping when deleting their account
+      allow delete: if isAuthenticated() && resource.data.uid == request.auth.uid;
+    }
+
+    // Friend Requests
+    match /friend_requests/{requestId} {
+      // Only sender or recipient can read existing requests; checking a nonexistent request is allowed only if caller UID matches the ID
+      allow get: if isAuthenticated() && (
+        (resource != null && (resource.data.fromUid == request.auth.uid || resource.data.toUid == request.auth.uid)) ||
+        (resource == null && (requestId.matches('^' + request.auth.uid + '_.*') || requestId.matches('.*_' + request.auth.uid + '$')))
+      );
+      allow list: if isAuthenticated() && (
+        resource.data.fromUid == request.auth.uid ||
+        resource.data.toUid == request.auth.uid
+      );
+
+      // Sender creates pending request
+      allow create: if isAuthenticated() && isValidFriendRequestCreate(requestId);
+
+      // Recipient updates status to accepted or declined
+      allow update: if isAuthenticated() && isValidFriendRequestUpdate();
+
+      // Either participant can cancel pending request or clean up declined request; accepted requests are permanent audit proof
+      allow delete: if isAuthenticated() && (
+        resource.data.fromUid == request.auth.uid ||
+        resource.data.toUid == request.auth.uid
+      ) && resource.data.status != 'accepted';
+    }
+  }
+}
