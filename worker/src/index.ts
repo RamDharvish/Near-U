@@ -180,13 +180,24 @@ export default {
         );
       }
 
-      // 1. Deliver event to recipient's nearu_events subcollection
+      // 1. Retrieve recipient-assigned custom nickname for sender (if any)
+      let effectiveFromName = fromName;
+      try {
+        const recipientNickname = await firestore.getRecipientNickname(toUid, senderUid);
+        if (recipientNickname) {
+          effectiveFromName = recipientNickname;
+        }
+      } catch (nickErr) {
+        console.warn('[Worker Push] Failed to retrieve recipient nickname, falling back to fromName:', nickErr);
+      }
+
+      // 2. Deliver event to recipient's nearu_events subcollection
       // (This triggers in-app reception when app is open in foreground)
       // Uses atomic document creation: if eventId already exists in Firestore (409 Conflict),
       // we detect it and avoid duplicate push delivery across concurrent isolates.
       const createResult = await firestore.createNearuEventDoc(toUid, eventId, {
         fromUid: senderUid,
-        fromName,
+        fromName: effectiveFromName,
         message: rawMessage,
         type: eventType,
       });
@@ -200,7 +211,7 @@ export default {
         });
       }
 
-      // 2. Fetch recipient's Expo push tokens
+      // 3. Fetch recipient's Expo push tokens
       const tokenRecords = await firestore.getRecipientPushTokens(toUid);
       const pushTokens = tokenRecords.map((r) => r.token);
 
@@ -213,7 +224,7 @@ export default {
         errors: [],
       };
 
-      // 3. Send Push Notifications via Expo Push Service
+      // 4. Send Push Notifications via Expo Push Service
       if (pushTokens.length > 0) {
         try {
           deliveryResult = await sendExpoPushNotifications(pushTokens, {
@@ -221,7 +232,7 @@ export default {
             type: eventType,
             eventId,
             fromUid: senderUid,
-            fromName,
+            fromName: effectiveFromName,
           });
 
           // 4. Save pending receipt records in Firestore for successfully queued tickets

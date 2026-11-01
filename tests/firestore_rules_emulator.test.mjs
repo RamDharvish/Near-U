@@ -227,8 +227,69 @@ if (hasEmulator) {
     // Alice trying to delete Bob's users document: DENIED
     await assertFails(deleteDoc(doc(aliceDb, 'users', 'user_bob')));
   });
+
+  // -------------------------------------------------------------------------
+  // 9. Recipient-specific nicknames security rules
+  // -------------------------------------------------------------------------
+  test('Emulator: User CAN read, create, update, and delete their own nickname records', async () => {
+    const bobDb = testEnv.authenticatedContext('user_bob').firestore();
+
+    // Bob creates a nickname for friend Alice
+    await assertSucceeds(
+      setDoc(doc(bobDb, 'users', 'user_bob', 'nicknames', 'user_alice'), {
+        nickname: 'AAA',
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    // Bob reads the nickname
+    const snap = await assertSucceeds(getDoc(doc(bobDb, 'users', 'user_bob', 'nicknames', 'user_alice')));
+    assert.equal(snap.exists(), true);
+    assert.equal(snap.data().nickname, 'AAA');
+
+    // Bob updates the nickname
+    await assertSucceeds(
+      setDoc(doc(bobDb, 'users', 'user_bob', 'nicknames', 'user_alice'), {
+        nickname: 'My Bestie',
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    // Bob deletes the nickname
+    await assertSucceeds(deleteDoc(doc(bobDb, 'users', 'user_bob', 'nicknames', 'user_alice')));
+  });
+
+  // -------------------------------------------------------------------------
+  // 10. Another user is DENIED access to read, modify, or delete another user\'s nicknames
+  // -------------------------------------------------------------------------
+  test('Emulator: Another user is DENIED access to read, modify, or delete someone else nicknames', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      const db = context.firestore();
+      await setDoc(doc(db, 'users', 'user_bob', 'nicknames', 'user_alice'), {
+        nickname: 'AAA',
+        updatedAt: Timestamp.now(),
+      });
+    });
+
+    const eveDb = testEnv.authenticatedContext('user_eve').firestore();
+
+    // Eve trying to read Bob\'s nickname for Alice: DENIED
+    await assertFails(getDoc(doc(eveDb, 'users', 'user_bob', 'nicknames', 'user_alice')));
+
+    // Eve trying to overwrite Bob\'s nickname for Alice: DENIED
+    await assertFails(
+      setDoc(doc(eveDb, 'users', 'user_bob', 'nicknames', 'user_alice'), {
+        nickname: 'Hacked',
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    // Eve trying to delete Bob\'s nickname for Alice: DENIED
+    await assertFails(deleteDoc(doc(eveDb, 'users', 'user_bob', 'nicknames', 'user_alice')));
+  });
 } else {
   test('Emulator tests skipped: FIRESTORE_EMULATOR_HOST environment variable not set', () => {
     assert.ok(true, 'Skipped because not launched inside emulators:exec');
   });
 }
+

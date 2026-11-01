@@ -203,6 +203,37 @@ export class FirestoreClient {
   }
 
   /**
+   * Retrieves the recipient-assigned nickname for a sender from users/{recipientUid}/nicknames/{senderUid}.
+   * Returns trimmed nickname string if found and non-empty, or null if not found or on error.
+   */
+  async getRecipientNickname(recipientUid: string, senderUid: string): Promise<string | null> {
+    try {
+      const authHeaders = await this.getAuthHeader();
+      const encodedRecipient = encodeURIComponent(recipientUid);
+      const encodedSender = encodeURIComponent(senderUid);
+      const url = `${this.baseUrl}/users/${encodedRecipient}/nicknames/${encodedSender}`;
+
+      const res = await fetch(url, { headers: authHeaders });
+      if (!res.ok) {
+        return null;
+      }
+
+      interface NicknameDocResponse {
+        fields?: {
+          nickname?: { stringValue?: string };
+        };
+      }
+
+      const data = (await res.json()) as NicknameDocResponse;
+      const nick = data.fields?.nickname?.stringValue;
+      return nick && typeof nick === 'string' && nick.trim() ? nick.trim().slice(0, 30) : null;
+    } catch (err) {
+      console.warn(`[Firestore] Failed to read nickname for ${senderUid} from ${recipientUid}:`, err);
+      return null;
+    }
+  }
+
+  /**
    * Writes the NearU event document into users/{recipientUid}/nearu_events/{eventId}.
    * Uses Firestore's atomic document creation: if a document with eventId already exists,
    * Firestore returns HTTP 409 Conflict (ALREADY_EXISTS), providing an atomic global deduplication guarantee.

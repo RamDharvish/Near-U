@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { isExpoPushToken } from '../worker/src/firestore.ts';
+import { isExpoPushToken, FirestoreClient } from '../worker/src/firestore.ts';
 import {
   sendExpoPushNotifications,
   fetchExpoPushReceipts,
@@ -508,4 +508,143 @@ test('Security & Routes: worker module exports scheduled handler, /api/check-rec
   assert.match(wranglerContent, /\[triggers\]/);
   assert.match(wranglerContent, /crons\s*=\s*\[.*\*\/30.*\]/);
 });
+
+// =========================================================================
+// 8. Recipient-Specific Nickname Resolution & Push Banner Tests
+// =========================================================================
+
+test('Worker Push: Uses recipient-assigned nickname in notification banner title and payload', async () => {
+  const originalFetch = globalThis.fetch;
+  let interceptedRequestBody = null;
+
+  globalThis.fetch = async (url, options) => {
+    interceptedRequestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      json: async () => ({
+        data: [{ status: 'ok', id: 'ticket_nick_1' }],
+      }),
+    };
+  };
+
+  try {
+    const tokens = ['ExponentPushToken[Recipient_B_Token_111]'];
+    // Scenario: Sender A ("Ram") sends to B, who assigned A the nickname "AAA"
+    const result = await sendExpoPushNotifications(tokens, {
+      message: 'Hope you are doing well!',
+      type: 'standard',
+      eventId: 'evt_nick_test_1',
+      fromUid: 'uid_sender_ram',
+      fromName: 'AAA', // Recipient B's assigned nickname
+    });
+
+    assert.equal(interceptedRequestBody[0].title, 'AAA · Near-U', 'Notification title must show recipient chosen nickname');
+    assert.equal(interceptedRequestBody[0].body, 'Hope you are doing well!');
+    assert.equal(interceptedRequestBody[0].data.fromName, 'AAA');
+    assert.equal(result.totalSuccessful, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Worker Push: Falls back to sender profile name when recipient has not assigned a nickname', async () => {
+  const originalFetch = globalThis.fetch;
+  let interceptedRequestBody = null;
+
+  globalThis.fetch = async (url, options) => {
+    interceptedRequestBody = JSON.parse(options.body);
+    return {
+      ok: true,
+      json: async () => ({
+        data: [{ status: 'ok', id: 'ticket_nick_2' }],
+      }),
+    };
+  };
+
+  try {
+    const tokens = ['ExponentPushToken[Recipient_C_Token_222]'];
+    // Scenario: Sender A ("Ram") sends to C, who has NO nickname assigned to A
+    const result = await sendExpoPushNotifications(tokens, {
+      message: 'Hope you are doing well!',
+      type: 'standard',
+      eventId: 'evt_nick_test_2',
+      fromUid: 'uid_sender_ram',
+      fromName: 'Ram', // Original profile name
+    });
+
+    assert.equal(interceptedRequestBody[0].title, 'Ram · Near-U', 'Notification title must show original sender name for C');
+    assert.equal(interceptedRequestBody[0].body, 'Hope you are doing well!');
+    assert.equal(interceptedRequestBody[0].data.fromName, 'Ram');
+    assert.equal(result.totalSuccessful, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('FirestoreClient getRecipientNickname: fetches and parses nickname from users/{recipientUid}/nicknames/{senderUid}', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = null;
+
+  globalThis.fetch = async (url) => {
+    requestedUrl = url.toString();
+    if (requestedUrl.includes('/users/uid_recipient_b/nicknames/uid_sender_a')) {
+      return {
+        ok: true,
+        json: async () => ({
+          fields: {
+            nickname: { stringValue: 'AAA' },
+            updatedAt: { timestampValue: '2026-11-01T12:00:00Z' },
+          },
+        }),
+      };
+    }
+    return { ok: false, status: 404 };
+  };
+
+  try {
+    const mockServiceAccount = {
+      client_email: 'test@nearu-962eb.iam.gserviceaccount.com',
+      private_key: '-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQD\n-----END PRIVATE KEY-----',
+      project_id: 'nearu-962eb',
+    };
+
+    const client = new FirestoreClient(mockServiceAccount);
+    client.getAuthHeader = async () => ({ Authorization: 'Bearer mock_token' });
+
+    // 1. Found nickname
+    const nick = await client.getRecipientNickname('uid_recipient_b', 'uid_sender_a');
+    assert.equal(nick, 'AAA');
+    assert.ok(requestedUrl.includes('/users/uid_recipient_b/nicknames/uid_sender_a'));
+
+    // 2. Not found nickname (404) -> falls back safely to null
+    const noNick = await client.getRecipientNickname('uid_recipient_c', 'uid_sender_a');
+    assert.equal(noNick, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('FirestoreClient getRecipientNickname: handles network errors safely without throwing', async () => {
+  const originalFetch = globalThis.fetch;
+
+  globalThis.fetch = async () => {
+    throw new Error('Network timeout connecting to Firestore REST API');
+  };
+
+  try {
+    const mockServiceAccount = {
+      client_email: 'test@nearu-962eb.iam.gserviceaccount.com',
+      private_key: '',
+      project_id: 'nearu-962eb',
+    };
+    const client = new FirestoreClient(mockServiceAccount);
+    client.getAuthHeader = async () => ({ Authorization: 'Bearer mock_token' });
+
+    const result = await client.getRecipientNickname('uid_b', 'uid_a');
+    assert.equal(result, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 

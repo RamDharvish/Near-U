@@ -56,6 +56,8 @@ import {
   removeFriend,
   clearAllFriends,
   deleteUserAccount,
+  syncNicknameToCloud,
+  getCloudNicknames,
 } from '../services/pairing';
 import { auth, subscribeToAuthChanges } from '../services/firebase';
 import * as Notifications from 'expo-notifications';
@@ -284,6 +286,22 @@ export const MainScreen: React.FC<MainScreenProps> = ({
         const synced = await syncUserIdentityWithCloud(userProfile.name, userProfile.id);
         if (isMounted) {
           setProfile(synced);
+        }
+
+        // Synchronize recipient nicknames with Cloud Firestore in background
+        const currentUid = synced?.uid || userProfile.uid || auth.currentUser?.uid;
+        if (currentUid && savedNicknames) {
+          const cloudNicknames = await getCloudNicknames(currentUid);
+          const merged = { ...cloudNicknames, ...savedNicknames };
+          // If there are local nicknames not yet in cloud, push them
+          for (const [fUid, nick] of Object.entries(savedNicknames)) {
+            if (nick && cloudNicknames[fUid] !== nick) {
+              syncNicknameToCloud(fUid, nick).catch(() => {});
+            }
+          }
+          if (isMounted && Object.keys(cloudNicknames).length > 0) {
+            setNicknames(merged);
+          }
         }
       } catch (err) {
         console.info('[Nearu] Background cloud sync note:', err);
@@ -675,6 +693,9 @@ export const MainScreen: React.FC<MainScreenProps> = ({
   const handleSaveNickname = async (friendUid: string, nickname: string) => {
     const updated = await storageSetNickname(friendUid, nickname);
     setNicknames(updated);
+    syncNicknameToCloud(friendUid, nickname).catch((err) => {
+      console.warn('[Nearu Nicknames] Failed to sync nickname to cloud:', err);
+    });
   };
 
   // Default Friend management

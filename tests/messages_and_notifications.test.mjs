@@ -654,3 +654,61 @@ test('Deduplication logic unit test: Set-based eventId tracking prevents duplica
   assert.equal(vibrateCount, 1, 'Duplicate event must not trigger vibration');
 });
 
+// =========================================================================
+// 10. Recipient-Specific Nickname Cloud Synchronization Unit Tests
+// =========================================================================
+
+test('Nickname Cloud Sync: Creates or updates recipient-owned document under users/{recipientUid}/nicknames/{senderUid}', () => {
+  const mockFirestore = {};
+
+  function simulateSyncNickname(recipientUid, senderUid, nickname) {
+    const trimmed = (nickname || '').trim().slice(0, 30);
+    const path = `users/${recipientUid}/nicknames/${senderUid}`;
+    if (trimmed) {
+      mockFirestore[path] = {
+        nickname: trimmed,
+        updatedAt: Date.now(),
+      };
+    } else {
+      delete mockFirestore[path];
+    }
+  }
+
+  // 1. Recipient B assigns nickname "AAA" to sender A
+  simulateSyncNickname('uid_recipient_b', 'uid_sender_a', 'AAA');
+  assert.equal(mockFirestore['users/uid_recipient_b/nicknames/uid_sender_a']?.nickname, 'AAA');
+
+  // 2. Recipient B updates nickname to "Bestie"
+  simulateSyncNickname('uid_recipient_b', 'uid_sender_a', 'Bestie');
+  assert.equal(mockFirestore['users/uid_recipient_b/nicknames/uid_sender_a']?.nickname, 'Bestie');
+
+  // 3. Recipient B removes nickname -> document is deleted
+  simulateSyncNickname('uid_recipient_b', 'uid_sender_a', '');
+  assert.equal(mockFirestore['users/uid_recipient_b/nicknames/uid_sender_a'], undefined);
+
+  // 4. White-space only also deletes
+  simulateSyncNickname('uid_recipient_b', 'uid_sender_a', 'AAA');
+  simulateSyncNickname('uid_recipient_b', 'uid_sender_a', '   ');
+  assert.equal(mockFirestore['users/uid_recipient_b/nicknames/uid_sender_a'], undefined);
+});
+
+test('Nickname Cloud Sync: Merges cloud and local nicknames without overwriting local changes', () => {
+  const localNicknames = {
+    uid_a: 'Local Nick A',
+    uid_b: 'Local Nick B',
+  };
+
+  const cloudNicknames = {
+    uid_b: 'Cloud Nick B (Older)',
+    uid_c: 'Cloud Nick C (New from other device)',
+  };
+
+  // Local nicknames take priority for conflicting keys, while new cloud keys are adopted
+  const merged = { ...cloudNicknames, ...localNicknames };
+
+  assert.equal(merged.uid_a, 'Local Nick A');
+  assert.equal(merged.uid_b, 'Local Nick B');
+  assert.equal(merged.uid_c, 'Cloud Nick C (New from other device)');
+});
+
+

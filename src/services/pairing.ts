@@ -653,6 +653,13 @@ export async function removeFriend(friendUid: string): Promise<RemoveFriendResul
       await storageSetDefaultFriendId(null);
     }
 
+    // 4. Remove recipient-assigned nickname document if any
+    try {
+      await deleteDoc(doc(db, 'users', currentUid, 'nicknames', friendUid));
+    } catch {
+      // Non-fatal
+    }
+
     return {
       success: true,
       message: 'Friend removed successfully.',
@@ -711,6 +718,13 @@ export async function clearAllFriends(): Promise<ClearFriendsResult> {
           await deleteDoc(doc(db, 'users', friendUid, 'friends', currentUid));
         } catch (recipErr: any) {
           console.info(`[Nearu Pairing] Reciprocal clear note for ${friendUid}:`, recipErr?.code || recipErr?.message);
+        }
+
+        // Clean up recipient-assigned nickname doc if any
+        try {
+          await deleteDoc(doc(db, 'users', currentUid, 'nicknames', friendUid));
+        } catch {
+          // ignore
         }
       } catch (err: any) {
         errors.push(`Friend ${friendUid}: ${err?.message || 'failed'}`);
@@ -842,7 +856,22 @@ export async function deleteUserAccount(): Promise<DeleteAccountResult> {
       failedSubcollections++;
     }
 
-    // 5. Clean up non-accepted friend requests involving this user
+    // 5. Remove recipient-assigned nicknames
+    try {
+      const nicknamesRef = collection(db, 'users', currentUid, 'nicknames');
+      const nicknamesSnap = await getDocs(nicknamesRef);
+      for (const nDoc of nicknamesSnap.docs) {
+        try {
+          await deleteDoc(nDoc.ref);
+        } catch {
+          failedSubcollections++;
+        }
+      }
+    } catch {
+      failedSubcollections++;
+    }
+
+    // 6. Clean up non-accepted friend requests involving this user
     try {
       const outgoingQ = query(collection(db, 'friend_requests'), where('fromUid', '==', currentUid));
       const outSnap = await getDocs(outgoingQ);
@@ -1311,4 +1340,79 @@ export function subscribeToNearuEvents(
   );
 }
 
+// =========================================================================
+// Recipient-Specific Nickname Cloud Synchronization
+// =========================================================================
 
+/**
+ * Synchronizes a recipient-assigned nickname for a friend to Cloud Firestore under:
+ * users/{currentUid}/nicknames/{friendUid}
+ * If nickname is non-empty, saves { nickname, updatedAt: serverTimestamp() }.
+ * If nickname is empty, deletes the document.
+ */
+export async function syncNicknameToCloud(friendUid: string, nickname: string): Promise<void> {
+  const currentUid = auth.currentUser?.uid;
+  if (!currentUid || !friendUid) return;
+
+  const trimmed = (nickname || '').trim().slice(0, 30);
+  const nickDocRef = doc(db, 'users', currentUid, 'nicknames', friendUid);
+
+  try {
+    if (trimmed) {
+      await setDoc(nickDocRef, {
+        nickname: trimmed,
+        updatedAt: serverTimestamp(),
+      });
+    } else {
+      await deleteDoc(nickDocRef);
+    }
+  } catch (err) {
+    console.warn(`[Nearu Nicknames] Failed to sync nickname for ${friendUid} to cloud:`, err);
+  }
+}
+
+/**
+ * Retrieves all recipient-assigned nicknames for the current user from Cloud Firestore:
+ * users/{uid}/nicknames
+ */
+export async function getCloudNicknames(uid: string): Promise<Record<string, string>> {
+  if (!uid) return {};
+  try {
+    const nicknamesRef = collection(db, 'users', uid, 'nicknames');
+    const snap = await getDocs(nicknamesRef);
+    const result: Record<string, string> = {};
+    for (const d of snap.docs) {
+      const data = d.data();
+      if (typeof data.nickname === 'string' && data.nickname.trim()) {
+        result[d.id] = data.nickname.trim();
+      }
+    }
+    return result;
+  } catch (err) {
+    console.warn('[Nearu Nicknames] Failed to fetch cloud nicknames:', err);
+    return {};
+  }
+}
+
+/**
+ * Batch-synchronizes all local nicknames to Cloud Firestore if they are missing or need update.
+ */
+export async function syncAllLocalNicknamesToCloud(localNicknames: Record<string, string>): Promise<void> {
+  const currentUid = auth.currentUser?.uid;
+  if (!currentUid || !localNicknames) return;
+
+  const entries = Object.entries(localNicknames).filter(([friendUid, nick]) => friendUid && nick && nick.trim());
+  if (entries.length === 0) return;
+
+  try {
+    const cloudNicknames = await getCloudNicknames(currentUid);
+    for (const [friendUid, nick] of entries) {
+      const trimmed = nick.trim().slice(0, 30);
+      if (cloudNicknames[friendUid] !== trimmed) {
+        await syncNicknameToCloud(friendUid, trimmed);
+      }
+    }
+  } catch (err) {
+    console.warn('[Nearu Nicknames] Failed to batch sync local nicknames to cloud:', err);
+  }
+}

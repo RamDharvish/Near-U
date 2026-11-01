@@ -222,6 +222,18 @@ service cloud.firestore {
         allow read, write, delete: if isOwner(userId);
       }
 
+      // Subcollection: Recipient-Specific Nicknames (Private to recipient/owner only)
+      match /nicknames/{friendUid} {
+        // Only owner can read, write, or delete their own nickname records
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId)
+          && hasRequiredFields(['nickname', 'updatedAt'])
+          && hasOnlyAllowedFields(['nickname', 'updatedAt'])
+          && validStringLength('nickname', 1, 30)
+          && request.resource.data.updatedAt is timestamp;
+        allow delete: if isOwner(userId);
+      }
+
       // Subcollection: Device-to-Device NearU Events
       match /nearu_events/{eventId} {
         // Recipient can read and clean up their own received events
